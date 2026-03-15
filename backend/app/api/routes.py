@@ -1,21 +1,30 @@
 import json
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 from werkzeug.utils import secure_filename
 
 from app.models.db import db
 from app.models.entities import FileRecord, Project, QaItem, Report, SceneSuggestion, Slide
 from app.parsers.file_parser import parse_file
-from app.services.core_services import build_report, generate_qa, generate_scene_suggestions, run_evaluation
+from app.services.core_services import SCENE_WEIGHTS, build_report, generate_qa, generate_scene_suggestions, run_evaluation
 
 api_bp = Blueprint("api", __name__)
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+ALLOWED_EXTENSIONS = {"txt", "pdf", "pptx"}
 
 
 def ok(data=None, message="ok"):
     return jsonify({"code": 0, "message": message, "data": data or {}})
+
+
+def fail(message: str, code: int = 400):
+    return jsonify({"code": 1, "message": message, "data": {}}), code
+
+
+def upload_dir() -> Path:
+    path = Path(current_app.config["UPLOAD_DIR"])
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @api_bp.get("/health")
@@ -26,10 +35,14 @@ def health():
 @api_bp.post("/projects")
 def create_project():
     payload = request.get_json(force=True)
+    scene_type = payload.get("scene_type", "competition")
+    if scene_type not in SCENE_WEIGHTS:
+        return fail(f"scene_type 不合法，可选: {', '.join(SCENE_WEIGHTS.keys())}")
+
     project = Project(
-        name=payload.get("name", "未命名项目"),
-        scene_type=payload.get("scene_type", "competition"),
-        target_minutes=int(payload.get("target_minutes", 10)),
+        name=(payload.get("name", "未命名项目") or "未命名项目").strip()[:120],
+        scene_type=scene_type,
+        target_minutes=max(3, min(60, int(payload.get("target_minutes", 10)))),
     )
     db.session.add(project)
     db.session.commit()
@@ -42,7 +55,7 @@ def bootstrap_demo():
     db.session.add(project)
     db.session.commit()
 
-    demo_path = UPLOAD_DIR / f"p{project.id}_demo_script.txt"
+    demo_path = upload_dir() / f"p{project.id}_demo_script.txt"
     demo_path.write_text(
         "项目背景\n我们解决答辩训练低效问题。\n\n"
         "方案设计\n提出解析-重构-问答-评估闭环。\n\n"
@@ -51,13 +64,7 @@ def bootstrap_demo():
         encoding="utf-8",
     )
 
-    record = FileRecord(
-        project_id=project.id,
-        file_name="demo_script.txt",
-        file_type="txt",
-        file_path=str(demo_path),
-        parse_status="pending",
-    )
+    record = FileRecord(project_id=project.id, file_name="demo_script.txt", file_type="txt", file_path=str(demo_path), parse_status="pending")
     db.session.add(record)
     db.session.commit()
 
@@ -67,26 +74,31 @@ def bootstrap_demo():
 @api_bp.get("/projects")
 def list_projects():
     rows = Project.query.order_by(Project.id.desc()).all()
-    return ok([
-        {"id": p.id, "name": p.name, "scene_type": p.scene_type, "target_minutes": p.target_minutes}
-        for p in rows
-    ])
+    return ok([{"id": p.id, "name": p.name, "scene_type": p.scene_type, "target_minutes": p.target_minutes} for p in rows])
 
 
 @api_bp.post("/files/upload")
 def upload_file():
-    project_id = int(request.form.get("project_id", 0))
+    try:
+        project_id = int(request.form.get("project_id", 0))
+    except ValueError:
+        return fail("project_id 必须是整数")
+
+    if project_id <= 0:
+        return fail("project_id 无效")
+    if Project.query.get(project_id) is None:
+        return fail("项目不存在", 404)
     if "file" not in request.files:
-        return jsonify({"code": 1, "message": "缺少文件", "data": {}}), 400
+        return fail("缺少文件")
 
     f = request.files["file"]
-    filename = secure_filename(f.filename)
+    filename = secure_filename(f.filename or "")
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if ext not in {"txt", "pdf", "pptx"}:
-        return jsonify({"code": 1, "message": "仅支持 txt/pdf/pptx", "data": {}}), 400
+    if ext not in ALLOWED_EXTENSIONS:
+        return fail("仅支持 txt/pdf/pptx")
 
     save_name = f"p{project_id}_{filename}"
-    save_path = UPLOAD_DIR / save_name
+    save_path = upload_dir() / save_name
     f.save(save_path)
 
     record = FileRecord(project_id=project_id, file_name=filename, file_type=ext, file_path=str(save_path), parse_status="pending")
@@ -151,8 +163,10 @@ def scene_rewrite(project_id: int):
     payload = request.get_json(silent=True) or {}
     project = Project.query.get_or_404(project_id)
     scene_type = payload.get("scene_type", project.scene_type)
-    project.scene_type = scene_type
+    if scene_type not in SCENE_WEIGHTS:
+        return fail(f"scene_type 不合法，可选: {', '.join(SCENE_WEIGHTS.keys())}")
 
+    project.scene_type = scene_type
     count = generate_scene_suggestions(project_id, scene_type)
     db.session.commit()
     return ok({"count": count, "scene_type": scene_type})

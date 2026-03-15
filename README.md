@@ -23,7 +23,10 @@ npm install
 npm run dev
 ```
 
-前端默认代理地址可通过 `VITE_API_BASE` 指定（默认 `/api`）。
+前端默认 API 地址可通过 `VITE_API_BASE` 指定（默认 `/api`）。
+后端可通过环境变量覆盖：
+- `DATABASE_URL`（默认 `sqlite:///yanxi_pro.db`）
+- `UPLOAD_DIR`（默认 `uploads`）
 
 ## 已实现 API
 - `GET /api/health`

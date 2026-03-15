@@ -1,13 +1,30 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from app import create_app
+from app.models.db import db
 
 
 class ApiTestCase(unittest.TestCase):
     def setUp(self):
-        self.app = create_app()
-        self.app.config.update(TESTING=True)
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.app = create_app(
+            {
+                "TESTING": True,
+                "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+                "UPLOAD_DIR": str(Path(self.tempdir.name) / "uploads"),
+            }
+        )
         self.client = self.app.test_client()
+        with self.app.app_context():
+            db.create_all()
+
+    def tearDown(self):
+        with self.app.app_context():
+            db.session.remove()
+            db.drop_all()
+        self.tempdir.cleanup()
 
     def test_health(self):
         resp = self.client.get('/api/health')
@@ -28,6 +45,10 @@ class ApiTestCase(unittest.TestCase):
         scene_list = self.client.get(f"/api/scene/project/{data['project_id']}")
         self.assertEqual(scene_list.status_code, 200)
         self.assertGreater(len(scene_list.get_json()['data']), 0)
+
+    def test_invalid_scene_type(self):
+        create = self.client.post('/api/projects', json={'name': 'x', 'scene_type': 'invalid'})
+        self.assertEqual(create.status_code, 400)
 
 
 if __name__ == '__main__':
